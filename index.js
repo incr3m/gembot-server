@@ -4,8 +4,10 @@ const pathFinder = require("./lib/path-finder");
 const sortBy = require("lodash/sortBy");
 const { getDiff, getDistance } = require("./lib/pointing");
 const jsonService = require("./lib/json-service");
+const initMap = require("./lib/init-map");
 const debug = require("./lib/debug");
 const cors = require("cors");
+var bodyParser = require("body-parser");
 
 const DEFAULT_TILE_SIZE_Y = 30;
 const DEFAULT_TILE_SIZE_X = 36;
@@ -22,12 +24,18 @@ function statsCheck({ deviceId, player }) {
   if (Number(oldX) === player.x && Number(oldY) === player.y) {
     const timeDiff = ts - oldTs;
     if (timeDiff > 30 * 1000) {
-      console.log(">>GemBotServer/index::", "pos check failed", timeDiff); //TRACE
+      console.log(
+        ">>GemBotServer/index::",
+        deviceId,
+        "pos check failed",
+        timeDiff
+      ); //TRACE
       // return { error: { vibrate: 1000, sleep: 5000 } };
       return { error: "NOT_MOVING_30" };
     } else if (timeDiff > 10 * 1000) {
       console.log(
         ">>GemBotServer/index::",
+        deviceId,
         "pos check failed",
         timeDiff,
         player
@@ -40,15 +48,25 @@ function statsCheck({ deviceId, player }) {
   return { ok: true };
 }
 
-function parseObjects(gameObjects = [], deviceId) {
+function parseObjects(gameObjects = [], options) {
   let player = {},
     mobs = [],
+    npc = [],
     items = [];
   gameObjects.forEach((e) => {
-    debug(deviceId, ">>GemBotServer/index::", "obj", e.name, e.status, e.type); //TRACE
+    debug(
+      options.id,
+      ">>GemBotServer/index::",
+      "obj",
+      e.name,
+      e.status,
+      e.type
+    ); //TRACE
     switch (e.type) {
       case "PC":
-        player = e;
+        if (getDistance(e, { x: options.plr_x, y: options.plr_y }) < 5)
+          player = e;
+        else npc.push(e);
         break;
       case "MOB":
         if (!e.name.includes("npc")) mobs.push(e);
@@ -58,6 +76,17 @@ function parseObjects(gameObjects = [], deviceId) {
         break;
     }
   });
+  if (!player.name && npc.length > 0) {
+    player = npc.pop();
+  }
+  const [currentHP, _1, maxHP] = options.plr_hp.split(" ");
+  const [currentSP, _2, maxSP] = options.plr_sp.split(" ");
+  player.vitals = {
+    currentHP,
+    maxHP,
+    currentSP,
+    maxSP,
+  };
 
   return { player, mobs, items };
 }
@@ -93,6 +122,7 @@ function getTargetMob(player, mobs, deviceId) {
         return 0;
       if (mob.status === "DEAD") return 99999;
       const dist = getDistance(player, mob);
+      mob.distance = dist;
       return dist;
     }
   );
@@ -118,7 +148,7 @@ async function process(data, options) {
   const deviceId = options.id;
   const deviceMapping = jsonService.get(deviceId);
   if (!deviceMapping || deviceMapping.disabled) {
-    debug(
+    console.log(
       deviceId,
       ">>GemBotServer/index::",
       "NO DEVICE MAPPING FOR ",
@@ -126,10 +156,20 @@ async function process(data, options) {
     ); //TRACE
     return { sleep: 20000 };
   }
+  jsonService.set(deviceId, "map", options.plr_map);
+
+  if (deviceMapping.FORCE_CLICK) {
+    const [x, y] = deviceMapping.FORCE_CLICK.split(",");
+    return {
+      x,
+      y,
+      sleep: 3000,
+    };
+  }
 
   const gameObjects = JSON.parse(data);
   // debug(deviceId,">>GemBotServer/index::", "gameObjects", gameObjects); //TRACE
-  const { player, mobs, items } = parseObjects(gameObjects, deviceId);
+  const { player, mobs, items } = parseObjects(gameObjects, options);
   // debug(deviceId,">>GemBotServer/index::", "gameObjects", gameObjects); //TRACE
   // debug(deviceId,">>GemBotServer/index::", "player", player); //TRACE
   const checks = statsCheck({ deviceId, player });
@@ -139,10 +179,15 @@ async function process(data, options) {
   ////////////////////////
 
   jsonService.set(deviceId, "game", { player, mobs, items });
-  if (player.status === "ATK1") return { sleep: 1000 };
 
   const targetMob = getTargetMob(player, mobs, deviceId);
   const targetItems = getTargetItem(player, items, deviceId);
+
+  if (player.status === "ATK1" && targetMob && targetMob.distance < 1) {
+    CHECKS[`${deviceId}::pos`] = "";
+    return { sleep: 1000 };
+  }
+
   let targetPoint;
 
   const hasItemsToPickup = targetItems && targetItems.length > 0;
@@ -269,29 +314,37 @@ function parseOption(opt) {
   return { ...options, center };
 }
 
+app.use(bodyParser.json());
+app.use(cors());
+
 app.post("/xy", async function (req, res) {
   // debug(deviceId,">>GemBotServer/index::", "hello"); //TRACE
-  // return res.send(JSON.stringify({ clickAction: true, sleep: 1000 }));
+  // return res.send(JSON.stringify({ clickHotkey: 0, sleep: 5000 }));
   let response = {};
   const options = parseOption(req.query.q2); //{"id":"8006baab5f937fd8","height":1280,"width":720}
-  // debug(deviceId,'>>GemBotServer/index::','req.query', req.query); //TRACE
+  // console.log(">>GemBotServer/index::", "req.query", req.query); //TRACE
   if (req.query.q) {
+    await initMap(options.plr_map);
     response = await process(req.query.q, options);
   }
   // debug(deviceId,">>GemBotServer/index::", "response", response, options); //TRACE
   return res.send(JSON.stringify(response));
 });
 
-app.use(cors());
-
 app.get("/devices", async function (req, res) {
   const fields = (req.query.fields || "").split(",");
-  return res.send(JSON.stringify(jsonService.ids(fields)));
+  return res.send(JSON.stringify(jsonService.ids([...fields, "FORCE_CLICK"])));
 });
 
 app.post("/save", async function (req, res) {
   const { body, query } = req;
-  jsonService.save(query.deviceId, JSON.parse(body));
+  jsonService.save(query.deviceId, body);
+  res.send({ ok: 1 });
+});
+
+app.post("/set", async function (req, res) {
+  const { body, query } = req;
+  jsonService.set(query.deviceId, query.field, body.value, true);
   res.send({ ok: 1 });
 });
 

@@ -10,16 +10,17 @@
         "itemExclude": [
             "나비날개분"
         ],
-        "allowAlerts": true
+        "allowAlerts": true,
+        "FORCE_CLICK": ""
     },
     "38bf9feada257016": {
-        "debug": false,
-        "disabled": true,
+        "debug": true,
+        "disabled": false,
         "map": "gef_fild04",
         "hunt": [
             "pupa",
-            "poring",
-            "creamy"
+            "creamy",
+            "poring"
         ],
         "itemExclude": [
             "나비날개분",
