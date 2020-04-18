@@ -1,7 +1,6 @@
 {
     "8006baab5f937fd8": {
         "disabled": false,
-        "map": "iz_dun01",
         "hunt": [
             "hydra",
             "vadon",
@@ -11,10 +10,11 @@
             "나비날개분"
         ],
         "allowAlerts": true,
-        "FORCE_CLICK": ""
+        "FORCE_CLICK": "",
+        "TRAVEL": "morroc_sphinx"
     },
     "38bf9feada257016": {
-        "debug": true,
+        "debug": false,
         "disabled": false,
         "map": "gef_fild04",
         "hunt": [

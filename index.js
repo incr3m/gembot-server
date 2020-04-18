@@ -157,6 +157,7 @@ async function process(data, options) {
     return { sleep: 20000 };
   }
   jsonService.set(deviceId, "map", options.plr_map);
+  const mapName = jsonService.get(deviceId, "map");
 
   if (deviceMapping.FORCE_CLICK) {
     const [x, y] = deviceMapping.FORCE_CLICK.split(",");
@@ -165,6 +166,16 @@ async function process(data, options) {
       y,
       sleep: 3000,
     };
+  }
+
+  let targetPoint, travelPoint;
+
+  if (deviceMapping.TRAVEL) {
+    travelPoint = require("./lib/travel-helper").getPoint(
+      deviceMapping.TRAVEL,
+      mapName
+    );
+    console.log(">>GemBotServer/index::", "travelPoint", mapName, travelPoint); //TRACE
   }
 
   const gameObjects = JSON.parse(data);
@@ -180,15 +191,16 @@ async function process(data, options) {
 
   jsonService.set(deviceId, "game", { player, mobs, items });
 
-  const targetMob = getTargetMob(player, mobs, deviceId);
-  const targetItems = getTargetItem(player, items, deviceId);
+  let targetMob, targetItems;
+  if (!travelPoint) {
+    targetMob = getTargetMob(player, mobs, deviceId);
+    targetItems = getTargetItem(player, items, deviceId);
+  }
 
   if (player.status === "ATK1" && targetMob && targetMob.distance < 1) {
     CHECKS[`${deviceId}::pos`] = "";
     return { sleep: 1000 };
   }
-
-  let targetPoint;
 
   const hasItemsToPickup = targetItems && targetItems.length > 0;
 
@@ -220,15 +232,9 @@ async function process(data, options) {
     // return Object.values(ERRORS)[0];
   }
 
-  //clear errors for this device
-  // delete ERRORS[deviceId];
-
-  // targetPoint = { x: player.x, y: player.y };
-
   let nextPoints;
   let patrolling = false,
     tooFar = false;
-  const mapName = jsonService.get(deviceId, "map");
 
   if (targetPoint) {
     const targetDistance = getDistance(targetPoint, player);
@@ -258,9 +264,18 @@ async function process(data, options) {
       deviceId,
     });
   }
+  if (travelPoint) {
+    patrolling = true;
+    nextPoints = pathFinder({
+      mapName,
+      from: player,
+      to: travelPoint,
+      deviceId,
+      travel: true,
+    });
+  }
 
   if (!nextPoints || nextPoints.length < 1) return { sleep: 2000 };
-
   const points = nextPoints.map((nextPoint) => {
     return toScreenCoords({
       player,
@@ -269,16 +284,6 @@ async function process(data, options) {
     });
   });
 
-  // debug(deviceId,
-  //   ">>GemBotServer/index::",
-  //   "clickPoint",
-  //   points.length,
-  //   player.x,
-  //   player.y
-  // ); //TRACE
-
-  // const dist = getDiff(player, targetMob);
-  // if (Math.abs(dist.x) < 2 && Math.abs(dist.y) < 2) return { sleep: 5000 };
   debug(
     deviceId,
     ">>GemBotServer/index::",
@@ -287,7 +292,6 @@ async function process(data, options) {
     player.x,
     player.y
   ); //TRACE
-
   // if (targetMob) return { points, sleep: 500 };
   if (targetPoint) return { points, sleep: 400 };
   if (patrolling) {
@@ -298,7 +302,7 @@ async function process(data, options) {
     if (player.status === "WALK" && points.length > 3) {
       thePoints = thePoints.slice(3);
     }
-    return { points: thePoints, sleep: 200 };
+    return { points: thePoints, sleep: 150 };
   }
 
   return { points, sleep: 2000 };
