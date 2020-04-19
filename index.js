@@ -7,13 +7,16 @@ const jsonService = require("./lib/json-service");
 const initMap = require("./lib/init-map");
 const debug = require("./lib/debug");
 const cors = require("cors");
-var bodyParser = require("body-parser");
+const bodyParser = require("body-parser");
+const lrandom = require("lodash/random");
 
 const DEFAULT_TILE_SIZE_Y = 30;
 const DEFAULT_TILE_SIZE_X = 36;
 
 const CHECKS = {};
 const ERRORS = {};
+
+const BATTLESTATUS = ["TAKEDAMAGE", "BATTLESTANCE", "ATK1", "ATK2"];
 
 function statsCheck({ deviceId, player }) {
   // check if moving
@@ -52,16 +55,19 @@ function parseObjects(gameObjects = [], options) {
   let player = {},
     mobs = [],
     npc = [],
-    items = [];
+    avoid = [],
+    aggro = [];
+  items = [];
+  const deviceId = options.id;
   gameObjects.forEach((e) => {
-    debug(
-      options.id,
-      ">>GemBotServer/index::",
-      "obj",
-      e.name,
-      e.status,
-      e.type
-    ); //TRACE
+    debug(deviceId, ">>GemBotServer/index::", "obj", e.name, e.status, e.type); //TRACE
+
+    const evadeList = jsonService.get(deviceId, `evade`, []);
+    let evadeRegx;
+    if (evadeList.length > 0) {
+      evadeRegx = new RegExp(evadeList.join("|"));
+    }
+
     switch (e.type) {
       case "PC":
         if (getDistance(e, { x: options.plr_x, y: options.plr_y }) < 5)
@@ -69,6 +75,8 @@ function parseObjects(gameObjects = [], options) {
         else npc.push(e);
         break;
       case "MOB":
+        if (evadeRegx && evadeRegx.test(e.name)) avoid.push(e);
+        if (BATTLESTATUS.includes(e.status)) aggro.push(e);
         if (!e.name.includes("npc")) mobs.push(e);
         break;
       case "ITEM":
@@ -88,7 +96,7 @@ function parseObjects(gameObjects = [], options) {
     maxSP,
   };
 
-  return { player, mobs, items };
+  return { player, mobs, items, avoid, aggro };
 }
 
 function getTargetMob(player, mobs, deviceId) {
@@ -97,29 +105,29 @@ function getTargetMob(player, mobs, deviceId) {
   const huntList = jsonService.get(deviceId, `hunt`, []);
   if (huntList.length < 1) return;
 
-  const mobHUnt = new RegExp(huntList.join("|"));
+  const allHunt = huntList[0] === "*";
+  const mobHUnt = !allHunt && new RegExp(huntList.join("|"));
   const list = sortBy(
     mobs.filter((mob) => {
       // const isKill = !mob.name.includes("Creamy");
-      const mobNameLower = mob.name.toLowerCase();
-      const isKill = mobHUnt.test(mobNameLower);
-      debug(
-        deviceId,
-        ">>GemBotServer/index::",
-        "isKill",
-        isKill,
-        mobNameLower,
-        mobHUnt
-      ); //TRACE
-      return (
-        isKill ||
-        (!isKill &&
-          ["TAKEDAMAGE", "BATTLESTANCE", "ATK1", "ATK2"].includes(mob.status))
-      );
+      let isKill;
+      if (allHunt) isKill = true;
+      else {
+        const mobNameLower = mob.name.toLowerCase();
+        isKill = mobHUnt.test(mobNameLower);
+        debug(
+          deviceId,
+          ">>GemBotServer/index::",
+          "isKill",
+          isKill,
+          mobNameLower,
+          mobHUnt
+        ); //TRACE
+      }
+      return isKill || (!isKill && BATTLESTATUS.includes(mob.status));
     }),
     (mob) => {
-      if (["TAKEDAMAGE", "BATTLESTANCE", "ATK1", "ATK2"].includes(mob.status))
-        return 0;
+      if (BATTLESTATUS.includes(mob.status)) return 0;
       if (mob.status === "DEAD") return 99999;
       const dist = getDistance(player, mob);
       mob.distance = dist;
@@ -133,12 +141,15 @@ function getTargetItem(player, items, deviceId) {
   if (!items || items.length < 1) return;
   if (!jsonService.get(deviceId)) return;
   const itemHuntList = jsonService.get(deviceId, "itemExclude", []);
-  if (itemHuntList.length < 1) return;
 
-  const itemAvoidRgx = new RegExp(itemHuntList.join("|"));
+  let itemAvoidRgx;
+  if (itemHuntList.length > 0)
+    itemAvoidRgx = new RegExp(itemHuntList.join("|"));
   const pickUp = items.filter((item) => {
     const { name = "" } = item;
-    debug(deviceId, ">>GemBotServer/index::", "item:", name); //TRACE
+    if (ERRORS[deviceId])
+      console.log(deviceId, ">>GemBotServer/index::", "item:", name); //TRACE
+    if (!itemAvoidRgx) return true;
     return !itemAvoidRgx.test(name);
   });
   return pickUp || [];
@@ -146,6 +157,7 @@ function getTargetItem(player, items, deviceId) {
 
 async function process(data, options) {
   const deviceId = options.id;
+  // console.log('>>GemBotServer/index::','deviceId', deviceId); //TRACE
   const deviceMapping = jsonService.get(deviceId);
   if (!deviceMapping || deviceMapping.disabled) {
     console.log(
@@ -175,14 +187,33 @@ async function process(data, options) {
       deviceMapping.TRAVEL,
       mapName
     );
-    console.log(">>GemBotServer/index::", "travelPoint", mapName, travelPoint); //TRACE
+    // console.log(">>GemBotServer/index::", "travelPoint", mapName, travelPoint); //TRACE
   }
 
   const gameObjects = JSON.parse(data);
   // debug(deviceId,">>GemBotServer/index::", "gameObjects", gameObjects); //TRACE
-  const { player, mobs, items } = parseObjects(gameObjects, options);
-  // debug(deviceId,">>GemBotServer/index::", "gameObjects", gameObjects); //TRACE
-  // debug(deviceId,">>GemBotServer/index::", "player", player); //TRACE
+  const { player, mobs, items, avoid, aggro } = parseObjects(
+    gameObjects,
+    options
+  );
+
+  const mightBeHiding = !player.x || !player.y;
+  const shouldRun = aggro.length > 4;
+
+  if (mightBeHiding) {
+    if (mobs.length < 4) return { clickHotkey: 1, sleep: 500 };
+    else return { sleep: 5000 };
+  }
+
+  if (shouldRun || avoid.length > 0) {
+    return { clickHotkey: 1, sleep: 10000 };
+  }
+
+  if (player) {
+    if (player.vitals.maxHP - player.vitals.currentHP > 500)
+      return { clickHotkey: [0, 2][lrandom(0, 1)], sleep: 400 };
+  }
+
   const checks = statsCheck({ deviceId, player });
   if (checks.error) ERRORS[deviceId] = checks.error;
   else delete ERRORS[deviceId];
@@ -197,7 +228,12 @@ async function process(data, options) {
     targetItems = getTargetItem(player, items, deviceId);
   }
 
-  if (player.status === "ATK1" && targetMob && targetMob.distance < 1) {
+  if (
+    !shouldRun &&
+    // BATTLESTATUS.includes(player.status) &&
+    targetMob &&
+    targetMob.distance < 2
+  ) {
     CHECKS[`${deviceId}::pos`] = "";
     return { sleep: 1000 };
   }
@@ -224,7 +260,8 @@ async function process(data, options) {
     const [errDevId, errorName] = Object.entries(ERRORS)[0];
     switch (errorName) {
       case "NOT_MOVING_30":
-        if (deviceMapping.allowAlerts) return { vibrate: 1000, sleep: 5000 };
+        if (!shouldRun && deviceMapping.allowAlerts)
+          return { vibrate: 1000, sleep: 5000 };
       case "NOT_MOVING_10":
         if (errDevId === deviceId) targetPoint = null; //should patrol
         break;
@@ -235,6 +272,11 @@ async function process(data, options) {
   let nextPoints;
   let patrolling = false,
     tooFar = false;
+
+  if (shouldRun) {
+    console.log(">>GemBotServer/index::", "run"); //TRACE
+    targetPoint = null;
+  }
 
   if (targetPoint) {
     const targetDistance = getDistance(targetPoint, player);
@@ -337,7 +379,9 @@ app.post("/xy", async function (req, res) {
 
 app.get("/devices", async function (req, res) {
   const fields = (req.query.fields || "").split(",");
-  return res.send(JSON.stringify(jsonService.ids([...fields, "FORCE_CLICK"])));
+  return res.send(
+    JSON.stringify(jsonService.ids([...fields, "FORCE_CLICK", "TRAVEL"]))
+  );
 });
 
 app.post("/save", async function (req, res) {
